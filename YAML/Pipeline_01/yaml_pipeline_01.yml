@@ -1,0 +1,226 @@
+trigger:
+- main
+pool: alam-agent
+
+stages:
+#.............................
+#        Stage-1     Terraform Plan
+#.............................
+- stage: plan
+  jobs:
+  - job: terraform_plan
+    steps:
+    - task: TerraformInstaller@1
+      displayName: terrorm install
+      inputs:
+        terraformVersion: 'latest'
+    - task: TerraformTask@5
+      displayName: init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'       # code in folder  Multi-stage
+        backendAzureRmUseEntraIdForAuthentication: false
+        backendServiceArm: 'nau-yml'
+        backendAzureRmResourceGroupName: 'naushad-rg'
+        backendAzureRmStorageAccountName: 'naushadalam32415'
+        backendAzureRmContainerName: 'nau-cont'
+        backendAzureRmKey: 'terraform.tfstate'
+    - task: TerraformTask@5
+      displayName: validate
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'              # code in folder  Multi-stage
+    - task: TerraformTask@5
+      displayName: plan
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'             # code in folder  Multi-stage
+        environmentServiceNameAzureRM: 'nau-yml'
+
+  # .....................................................
+  #   satge-2  Security scan 
+  #......................................................    
+
+- stage: scan
+  dependsOn: plan
+  condition: succeeded()
+  jobs:
+  - job: security_sacn
+    steps:
+    # - task: tfsec@1
+    #   inputs:
+    #     version: 'v1.26.0'
+
+    - task: Gitleaks@3
+      displayName: gitleaks
+      inputs:
+        scanlocation: '$(Build.SourcesDirectory)/Multi-stage'                          # code in folder  Multi-stage
+        configtype: 'default'
+        reportformat: 'sarif'
+
+  # .....................................................
+  #   satge-3  Upload Artifact 
+  #......................................................           
+
+- stage: artifact
+  dependsOn:
+  - plan
+  - scan
+  condition: succeeded()
+  jobs:
+  - job: upload_artifact
+    steps:
+    - task: TerraformInstaller@1
+      displayName: terrorm install
+      inputs:
+        terraformVersion: 'latest'
+    - task: TerraformTask@5
+      displayName: init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'             # code in folder  Multi-stage
+        backendAzureRmUseEntraIdForAuthentication: false
+        backendServiceArm: 'nau-yml'
+        backendAzureRmResourceGroupName: 'naushad-rg'
+        backendAzureRmStorageAccountName: 'naushadalam32415'
+        backendAzureRmContainerName: 'nau-cont'
+        backendAzureRmKey: 'terraform.tfstate'
+    - task: TerraformTask@5
+      displayName: validate
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'                   # code in folder  Multi-stage
+    - task: TerraformTask@5
+      displayName: plan
+      inputs:
+        provider: 'azurerm'
+        command: 'plan' 
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'                  # code in folder  Multi-stage
+        environmentServiceNameAzureRM: 'nau-yml'
+        commandOptions: '-out="$(Build.ArtifactStagingDirectory)\tfplan"'                  # Save the output of plan in default directory   $(Build.ArtifactStagingDirectory)
+    - task: PowerShell@2
+      displayName: Readable format
+      inputs:
+        targetType: 'inline'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'                  # code in folder  Multi-stage
+        script: 
+        # show the artifact tfplan output and save in human readable format tfplan.txt
+         'terraform show -no-color "$(Build.ArtifactStagingDirectory)\tfplan" > "$(Build.ArtifactStagingDirectory)\tfplan.txt"'  
+
+
+    - task: PublishPipelineArtifact@1
+      displayName: publish artifact 
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)'               # publish the artifact in default directroty
+        artifact: 'terraform-plann'                                   # articat name terraform-plann
+        publishLocation: 'pipeline'
+
+  # .....................................................
+  #   satge-4  Manual Approval 
+  #......................................................                   
+
+- stage: Approval
+  pool: server 
+  dependsOn:
+  - plan
+  - scan
+  - artifact
+  condition: succeeded()
+  jobs:
+ 
+  - job: Manual_Approval
+    steps:
+    - task: ManualValidation@1
+      inputs:
+        notifyUsers: 'naushad@amitkrsaini25gmail.onmicrosoft.com'
+        approvers: 'naushad@amitkrsaini25gmail.onmicrosoft.com'
+        instructions: 'Please review and approve the deployment'
+
+
+
+  # .....................................................
+  #   satge-5  Deployment Stage 
+  #......................................................             
+- stage: Deployment
+  dependsOn:
+  - Approval
+  condition: succeeded()
+  jobs:
+  - job: Apply
+    steps:
+    - task: TerraformInstaller@1
+      displayName: Terraform install
+      inputs:
+        terraformVersion: 'latest'
+
+
+    - task: DownloadPipelineArtifact@2
+      displayName: Download Artifact
+      inputs:
+        buildType: 'current'
+        artifactName: 'terraform-plann'
+        targetPath: '$(Pipeline.Workspace)'            # download artifact from default path
+
+    - task: PowerShell@2
+      displayName: Verify Download artifact
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Artifact Downloaded"
+          
+          Get-ChildItem -Path "$(Pipeline.Workspace)/terraform-plann" -Recurse
+
+    - task: TerraformTask@5
+      displayName: init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'              # code in folder  Multi-stage
+        backendAzureRmUseEntraIdForAuthentication: false
+        backendServiceArm: 'nau-yml'
+        backendAzureRmResourceGroupName: 'naushad-rg'
+        backendAzureRmStorageAccountName: 'naushadalam32415'
+        backendAzureRmContainerName: 'nau-cont'
+        backendAzureRmKey: 'terraform.tfstate'
+
+    - task: TerraformTask@5
+      displayName: Apply
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/Multi-stage'             # code in folder  Multi-stage
+        commandOptions: '"$(Pipeline.Workspace)/tfplan"'                              # means final command run " terraform apply tfplan " command, where tfplan is output articat  of plan command 
+        environmentServiceNameAzureRM: 'nau-yml'
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
